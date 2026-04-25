@@ -1,4 +1,12 @@
 <!DOCTYPE html>
+<!--
+  KEATS Downloader
+  https://github.com/Saif-AD/keats_downloader
+
+  Copyright (c) 2026 Saif-AD
+  Released under the MIT License.
+  https://github.com/Saif-AD/keats_downloader/blob/main/LICENSE
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -43,6 +51,13 @@
       </div>
       <div id="library-list" class="library-list"></div>
       <p id="library-empty" class="library-empty hidden">No downloads yet</p>
+      <div id="last-run-row" class="last-run-row hidden">
+        <span id="last-run-summary" class="last-run-summary"></span>
+        <button id="btn-last-run-log" class="btn-text">View last log</button>
+      </div>
+      <div id="last-run-log-container" class="log-container hidden">
+        <div id="last-run-log" class="log"></div>
+      </div>
     </div>
 
     <!-- Ready -->
@@ -65,10 +80,11 @@
           <input type="checkbox" id="opt-materials" checked>
           <span>Course materials (PDFs, slides, files)</span>
         </label>
-        <label class="checkbox-row">
+        <label class="checkbox-row" title="Each Kaltura video is typically 15–50 MB and can take a few minutes to download. If you don't need an offline copy, it's usually faster to watch in KEATS.">
           <input type="checkbox" id="opt-videos">
           <span>Include videos in weekly sections (Kaltura)</span>
         </label>
+        <p id="videos-warning" class="option-hint hidden">Videos are large — a full course of 20+ lectures can take 30 min. Watch in KEATS if you don't need them offline.</p>
         <label class="checkbox-row">
           <input type="checkbox" id="opt-captures">
           <span>Lecture capture recordings (Echo360)</span>
@@ -84,16 +100,21 @@
       </div>
 
       <div class="download-path-row">
-        <div class="path-bar">
+        <div class="path-label">Save folder (click to rename)</div>
+        <div class="path-bar" title="Chrome can only save inside your Downloads folder. Click the white box to rename the subfolder.">
           <svg class="path-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
           </svg>
           <span class="path-crumb">Downloads</span>
           <span class="path-sep">/</span>
-          <input type="text" id="download-path" value="KEATS Downloads" spellcheck="false" placeholder="Folder name">
+          <input type="text" id="download-path" value="KEATS Downloads" spellcheck="false" placeholder="Folder name" aria-label="Folder name inside Downloads">
           <span class="path-sep">/</span>
           <span class="path-crumb course-crumb" id="path-course-name"></span>
         </div>
+        <label class="checkbox-row overwrite-row" title="If a file with the same name already exists on disk, replace it. Off: both are kept, with a suffix like file (1).pdf.">
+          <input type="checkbox" id="opt-overwrite">
+          <span>Replace files with the same name (otherwise both are kept)</span>
+        </label>
       </div>
 
       <button id="btn-download" class="btn-primary">
@@ -142,7 +163,14 @@
         </div>
       </div>
       <p id="save-path" class="save-path">Saved to <strong>Downloads/KEATS Downloads/</strong></p>
-      <button id="btn-done" class="btn-primary">Done</button>
+      <div class="complete-actions">
+        <button id="btn-show-log" class="btn-secondary">Show logs</button>
+        <button id="btn-open-downloads" class="btn-secondary" title="Open Chrome's download history in a new tab">Open downloads</button>
+        <button id="btn-done" class="btn-primary">Done</button>
+      </div>
+      <div id="complete-log-container" class="log-container hidden">
+        <div id="complete-log" class="log"></div>
+      </div>
     </div>
 
     <footer>
@@ -152,7 +180,7 @@
         </svg>
         Saif-AD
       </a>
-      <span class="version">v1.4.0</span>
+      <span class="version">v1.4.1</span>
     </footer>
   </div>
 

@@ -1,3 +1,16 @@
+/*!
+ * KEATS Downloader
+ * https://github.com/Saif-AD/keats_downloader
+ *
+ * Copyright (c) 2026 Saif-AD
+ * Released under the MIT License.
+ * https://github.com/Saif-AD/keats_downloader/blob/main/LICENSE
+ *
+ * Original author: Saif-AD. If you are reading this in a fork or copy,
+ * the MIT License requires this notice to be preserved in all copies
+ * or substantial portions of the Software.
+ */
+
 // Popup UI controller
 
 const $ = (sel) => document.querySelector(sel);
@@ -17,6 +30,19 @@ function showView(name) {
 function isMoodleCoursePage(url) {
   if (!url) return false;
   return /\/course\/view\.php/.test(url);
+}
+
+// Prettier course name for display and folder path. Mirrors the background
+// worker's logic so header, save-path and library all agree.
+function cleanCourseName(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let name = raw.trim();
+  name = name.replace(/\s*\([^)]*(?:\d{2}~\d{2}|SEM|SY|\d{4})[^)]*\)\s*$/i, '');
+  const codeToken = '[A-Z]*\\d[A-Z0-9]*';
+  const codeRe = new RegExp(`^\\s*(${codeToken})(?:\\s*&\\s*${codeToken})*\\s+(\\S.*)$`);
+  const m = name.match(codeRe);
+  if (m) return `${m[2].trim()} (${m[1]})`;
+  return name;
 }
 
 // ---------- Theme toggle ----------
@@ -46,10 +72,12 @@ $('#theme-toggle').addEventListener('change', (e) => {
 
 async function loadDownloadPath() {
   try {
-    const data = await chrome.storage.local.get('downloadPath');
+    const data = await chrome.storage.local.get(['downloadPath', 'overwrite']);
     const path = data.downloadPath || 'KEATS Downloads';
     $('#download-path').value = path;
     autoSizePath();
+    const ow = $('#opt-overwrite');
+    if (ow) ow.checked = data.overwrite === true;
   } catch (e) {}
 }
 
@@ -75,8 +103,20 @@ async function loadLibrary() {
     const empty = $('#library-empty');
     const library = $('#library');
 
+    // The last-run row can show even when the library itself is empty — e.g.
+    // on a clean install after the user's first cancelled attempt.
+    await loadLastRunSummary();
+
     if (!history || history.total === 0) {
-      library.classList.add('hidden');
+      // Keep the library card visible if we have a last-run to show.
+      const row = $('#last-run-row');
+      if (row && !row.classList.contains('hidden')) {
+        library.classList.remove('hidden');
+        list.innerHTML = '';
+        empty.classList.remove('hidden');
+      } else {
+        library.classList.add('hidden');
+      }
       return;
     }
 
@@ -90,11 +130,12 @@ async function loadLibrary() {
     for (const [name, info] of courses) {
       const date = new Date(info.lastDownload);
       const dateStr = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      const displayName = cleanCourseName(name) || name;
       const item = document.createElement('div');
       item.className = 'library-item';
       item.innerHTML = `
         <div class="library-item-info">
-          <div class="library-item-name">${esc(name)}</div>
+          <div class="library-item-name">${esc(displayName)}</div>
           <div class="library-item-meta">${info.count} files · ${dateStr}</div>
         </div>
         <button class="btn-text btn-clear-course" data-course="${esc(name)}">Clear</button>
@@ -115,6 +156,64 @@ async function loadLibrary() {
 $('#btn-clear-all').addEventListener('click', async () => {
   await sendBg({ type: 'CLEAR_HISTORY' });
   loadLibrary();
+});
+
+// ---------- Last-run log persistence ----------
+//
+// The background worker saves the log of the most recent run (complete,
+// cancelled or failed) to chrome.storage so users can always review what
+// happened, even after clicking Done or after the service worker has been
+// suspended between sessions.
+
+function renderLogLines(lines) {
+  return lines.map(line => {
+    if (line.startsWith('Downloaded:') || line.startsWith('Shortcut saved:')) return `<span class="log-success">${esc(line)}</span>`;
+    if (line.startsWith('Failed:') || line.startsWith('Error:')) return `<span class="log-error">${esc(line)}</span>`;
+    if (line.startsWith('Skipped')) return `<span class="log-info">${esc(line)}</span>`;
+    if (line.startsWith('Course:') || line.startsWith('Sections:') || line.startsWith('Found') || line.startsWith('Done') || line.startsWith('Downloading') || line.startsWith('Format:'))
+      return `<span class="log-info">${esc(line)}</span>`;
+    return esc(line);
+  }).join('\n');
+}
+
+async function loadLastRunSummary() {
+  try {
+    const run = await sendBg({ type: 'GET_LAST_RUN' });
+    const row = $('#last-run-row');
+    const summary = $('#last-run-summary');
+    if (!row || !summary) return;
+    if (!run || !run.finishedAt) {
+      row.classList.add('hidden');
+      return;
+    }
+    const when = new Date(run.finishedAt);
+    const hh = when.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    const dd = when.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+    const statusWord = run.status === 'complete' ? 'Last run' :
+                       run.status === 'cancelled' ? 'Last run (cancelled)' :
+                       run.status === 'error' ? 'Last run (error)' : 'Last run';
+    summary.textContent = `${statusWord} · ${run.downloadedFiles || 0} ok · ${run.failedFiles || 0} failed · ${dd} ${hh}`;
+    row.classList.remove('hidden');
+  } catch (e) {}
+}
+
+$('#btn-last-run-log')?.addEventListener('click', async () => {
+  const container = $('#last-run-log-container');
+  const logEl = $('#last-run-log');
+  const btn = $('#btn-last-run-log');
+  if (!container || !logEl || !btn) return;
+  if (!container.classList.contains('hidden')) {
+    container.classList.add('hidden');
+    btn.textContent = 'View last log';
+    return;
+  }
+  try {
+    const run = await sendBg({ type: 'GET_LAST_RUN' });
+    logEl.innerHTML = run && Array.isArray(run.log) ? renderLogLines(run.log) : '<span class="log-info">No log saved yet.</span>';
+    container.classList.remove('hidden');
+    btn.textContent = 'Hide log';
+    container.scrollTop = container.scrollHeight;
+  } catch (e) {}
 });
 
 // ---------- Init ----------
@@ -202,6 +301,14 @@ async function init() {
           if (href && text && text.length > 0) tabSections.push({ href, name: text });
         }
 
+        // Moodle annotates <body> with format-{topics,weeks,grid,topcoll,
+        // onetopic,tiles,flexsections}. Pick the first recognised one up so
+        // the background worker can log it, and use it as a tiebreaker when
+        // two scrapers find the same number of sections.
+        const bodyClass = document.body.className || '';
+        const bodyFormatMatch = bodyClass.match(/\bformat-(topics|weeks|grid|topcoll|onetopic|tiles|flexsections)\b/);
+        const bodyFormat = bodyFormatMatch ? bodyFormatMatch[1] : null;
+
         let sections, format;
         const counts = [
           { arr: inlineSectionsArr, fmt: 'topics' },
@@ -210,26 +317,24 @@ async function init() {
         ];
         counts.sort((a, b) => b.arr.length - a.arr.length);
         sections = counts[0].arr;
-        format = counts[0].fmt;
-        return { courseName, sections, courseUrl, format };
+        format = bodyFormat || counts[0].fmt;
+        return { courseName, sections, courseUrl, format, bodyFormat };
       },
     });
 
     const info = results[0]?.result;
-    if (info && info.courseName && info.sections.length > 0) {
-      $('#course-name').textContent = info.courseName;
-      $('#section-count').textContent = info.sections.length;
-      $('#path-course-name').textContent = info.courseName.substring(0, 30);
+    if (info && info.courseName) {
+      const prettyName = cleanCourseName(info.courseName) || info.courseName;
+      $('#course-name').textContent = prettyName;
+      $('#path-course-name').textContent = prettyName.substring(0, 40);
+      if (info.sections.length > 0) {
+        $('#section-count').textContent = info.sections.length;
+      } else {
+        $('#section-count').textContent = '0';
+        info.sections = [{ href: info.courseUrl, name: info.courseName, inline: false }];
+      }
       showView('ready');
       window._courseInfo = info;
-      window._tabId = tab.id;
-    } else if (info && info.courseName) {
-      $('#course-name').textContent = info.courseName;
-      $('#section-count').textContent = '0';
-      $('#path-course-name').textContent = info.courseName.substring(0, 30);
-      showView('ready');
-      window._courseInfo = info;
-      window._courseInfo.sections = [{ href: info.courseUrl, name: info.courseName, inline: false }];
       window._tabId = tab.id;
     } else {
       showView('notKeats');
@@ -266,7 +371,8 @@ $('#btn-download').addEventListener('click', async () => {
   showView('progress');
 
   const downloadPath = $('#download-path').value.trim() || 'KEATS Downloads';
-  chrome.storage.local.set({ downloadPath });
+  const overwrite = $('#opt-overwrite').checked;
+  chrome.storage.local.set({ downloadPath, overwrite });
 
   await sendBg({
     type: 'START_DOWNLOAD',
@@ -278,6 +384,7 @@ $('#btn-download').addEventListener('click', async () => {
       captures: $('#opt-captures').checked,
       folders: $('#opt-folders').checked,
       optional: $('#opt-optional').checked,
+      overwrite,
       downloadPath,
     },
   });
@@ -320,6 +427,9 @@ $('#btn-done').addEventListener('click', () => {
   `;
   $('#btn-cancel').textContent = 'Cancel';
   $('#btn-cancel').disabled = false;
+  $('#complete-log-container')?.classList.add('hidden');
+  const showBtn = $('#btn-show-log');
+  if (showBtn) showBtn.textContent = 'Show logs';
   loadLibrary();
 });
 
@@ -364,14 +474,7 @@ function updateProgress(s) {
 
   $('#current-file').textContent = s.currentFile || '';
 
-  $('#log').innerHTML = s.log.map(line => {
-    if (line.startsWith('Downloaded:')) return `<span class="log-success">${esc(line)}</span>`;
-    if (line.startsWith('Failed:') || line.startsWith('Error:')) return `<span class="log-error">${esc(line)}</span>`;
-    if (line.startsWith('Skipped')) return `<span class="log-info">${esc(line)}</span>`;
-    if (line.startsWith('Course:') || line.startsWith('Sections:') || line.startsWith('Found') || line.startsWith('Done') || line.startsWith('Downloading'))
-      return `<span class="log-info">${esc(line)}</span>`;
-    return esc(line);
-  }).join('\n');
+  $('#log').innerHTML = renderLogLines(s.log);
 
   const lc = $('#log-container');
   lc.scrollTop = lc.scrollHeight;
@@ -389,7 +492,49 @@ function updateComplete(s) {
 
   const path = $('#download-path')?.value || 'KEATS Downloads';
   $('#save-path').innerHTML = `Saved to <strong>Downloads/${esc(path)}/</strong>`;
+
+  // Populate the complete-view log so "Show logs" has something to render
+  // even if the user only opens the popup after the run finished.
+  const completeLog = $('#complete-log');
+  if (completeLog && Array.isArray(s.log)) {
+    completeLog.innerHTML = renderLogLines(s.log);
+  }
 }
+
+// Show a size warning when the user enables Kaltura video downloads so they
+// can decide whether streaming in KEATS would be faster for their purpose.
+function refreshVideosHint() {
+  const hint = $('#videos-warning');
+  const box = $('#opt-videos');
+  if (!hint || !box) return;
+  if (box.checked) hint.classList.remove('hidden');
+  else hint.classList.add('hidden');
+}
+$('#opt-videos')?.addEventListener('change', refreshVideosHint);
+refreshVideosHint();
+
+// Open Chrome's own download history in a new tab. Every file the extension
+// has written appears there, searchable by "Downloaded by KEATS Downloader".
+$('#btn-open-downloads')?.addEventListener('click', () => {
+  try { chrome.tabs.create({ url: 'chrome://downloads/' }); } catch (e) {}
+});
+
+// Toggle the post-run log visibility.
+$('#btn-show-log')?.addEventListener('click', () => {
+  const container = $('#complete-log-container');
+  const btn = $('#btn-show-log');
+  if (!container) return;
+  const hidden = container.classList.contains('hidden');
+  if (hidden) {
+    container.classList.remove('hidden');
+    btn.textContent = 'Hide logs';
+    const lc = container;
+    lc.scrollTop = lc.scrollHeight;
+  } else {
+    container.classList.add('hidden');
+    btn.textContent = 'Show logs';
+  }
+});
 
 // ---------- Helpers ----------
 

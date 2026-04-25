@@ -1,15 +1,18 @@
 {
   "manifest_version": 3,
   "name": "KEATS Downloader",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Download all KEATS course materials in one click. Slides, videos, podcasts — organised into folders.",
+  "author": "Saif-AD",
+  "homepage_url": "https://github.com/Saif-AD/keats_downloader",
   "permissions": [
     "downloads",
     "downloads.ui",
     "activeTab",
     "scripting",
     "tabs",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "https://*/*"

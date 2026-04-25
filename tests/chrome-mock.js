@@ -36,6 +36,7 @@ function createChromeMock() {
           }
         }, 10);
       }),
+      search: jest.fn((_query, cb) => cb([])),
       setUiOptions: jest.fn().mockResolvedValue(),
       onChanged: {
         addListener: jest.fn((fn) => downloadListeners.push(fn)),
@@ -51,6 +52,11 @@ function createChromeMock() {
     action: {
       setBadgeText: jest.fn().mockResolvedValue(),
       setBadgeBackgroundColor: jest.fn().mockResolvedValue(),
+    },
+    alarms: {
+      create: jest.fn(),
+      clear: jest.fn((_name, cb) => cb && cb(true)),
+      onAlarm: { addListener: jest.fn() },
     },
     storage: {
       local: (() => {

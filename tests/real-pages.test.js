@@ -95,8 +95,14 @@ describe('Topics format — MDE-style course', () => {
     document.body.innerHTML = MDE_SECTION_HTML;
     const results = bg.scrapeAllInlineSections(['50003'], true);
 
-    // With optional included: 1 lecture + 1 optional + 0 kaltura = 2
-    expect(results['50003']).toHaveLength(2);
+    // With optional included: 1 lecture + 1 optional resource + 1 optional
+    // Kaltura video = 3. The Kaltura entry is now returned by the scraper;
+    // the caller's doVideos flag gates whether it actually gets downloaded.
+    expect(results['50003']).toHaveLength(3);
+    const kaltura = results['50003'].find(f => f.type === 'kaltura');
+    expect(kaltura).toBeDefined();
+    expect(kaltura.name).toContain('Week 2 Lecture Recording');
+    expect(kaltura.optional).toBe(true);
   });
 
   test('scrapeEcho360LTI finds lecture capture link', () => {
@@ -472,4 +478,203 @@ describe('Edge cases', () => {
     expect(resources.length).toBe(1);
     expect(folders.length).toBe(1);
   });
+});
+
+// ============================================================================
+// Moodle format compatibility matrix
+//
+// Safeguards that every scraper variant finds every downloadable content type
+// across every course format we claim to support. When a regression lands in
+// one scraper or one format, exactly one test fires and points at it.
+// ============================================================================
+
+describe('Moodle format compatibility — weeks format', () => {
+  // format_weeks uses <ul class="weeks"> instead of <ul class="topics"> but
+  // the <li.section> wrapper is otherwise identical. The same modtype_*
+  // classes identify activities so all three scrapers should behave the same.
+  const WEEKS_HTML = `
+    <div class="course-content">
+      <ul class="weeks">
+        <li id="section-1" data-id="70001" data-number="1" class="section main current">
+          <h3 class="sectionname">19 May</h3>
+          <div class="activity modtype_resource">
+            <a href="https://example.edu/mod/resource/view.php?id=700">Week 1 Slides File</a>
+          </div>
+          <div class="activity modtype_kalvidres">
+            <a href="https://example.edu/mod/kalvidres/view.php?id=701">Week 1 Lecture Kaltura Video Resource</a>
+          </div>
+          <div class="activity modtype_folder">
+            <a href="https://example.edu/mod/folder/view.php?id=702">Supplementary Folder</a>
+          </div>
+        </li>
+      </ul>
+    </div>
+  `;
+
+  test('scrapeAllInlineSections picks up resource, folder, and kaltura in a weeks section', () => {
+    document.body.innerHTML = WEEKS_HTML;
+    const results = bg.scrapeAllInlineSections(['70001'], false);
+    const section = results['70001'];
+    expect(section).toHaveLength(3);
+    const types = section.map(f => f.type).sort();
+    expect(types).toEqual(['folder', 'kaltura', 'resource']);
+  });
+
+  test('scrapeInlineSection mirrors scrapeAllInlineSections for the same weeks section', () => {
+    document.body.innerHTML = WEEKS_HTML;
+    const batch = bg.scrapeAllInlineSections(['70001'], false);
+    const single = bg.scrapeInlineSection('70001', false);
+    expect(single.length).toBe(batch['70001'].length);
+    const batchHrefs = batch['70001'].map(f => f.href).sort();
+    const singleHrefs = single.map(f => f.href).sort();
+    expect(singleHrefs).toEqual(batchHrefs);
+  });
+});
+
+describe('Moodle format compatibility — collapsed topics (topcoll)', () => {
+  // Research §1.6: topcoll wraps sections in <ul class="ctopics"> with a
+  // collapsible toggle and hides content inside .sectionbody. Newer releases
+  // add aria-expanded alongside toggle_closed/toggle_open.
+  const TOPCOLL_HTML = `
+    <div class="course-content">
+      <ul class="ctopics">
+        <li id="section-1" data-id="80001" data-number="1" class="section main">
+          <div class="content">
+            <div class="toggle">
+              <div class="toggle-arrow">
+                <a class="toggle_closed" href="#section-1" aria-expanded="false">Toggle</a>
+              </div>
+              <h3 class="sectionname">Week 1: Intro</h3>
+            </div>
+            <div class="sectionbody">
+              <div class="activity modtype_resource">
+                <a href="https://example.edu/mod/resource/view.php?id=800">Slides File</a>
+              </div>
+              <div class="activity modtype_kalvidres">
+                <a href="https://example.edu/mod/kalvidres/view.php?id=801">Lecture Kaltura Video Resource</a>
+              </div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    </div>
+  `;
+
+  test('all three scrapers detect Kaltura inside a collapsed-topics section', () => {
+    document.body.innerHTML = TOPCOLL_HTML;
+    const batch = bg.scrapeAllInlineSections(['80001'], false);
+    const single = bg.scrapeInlineSection('80001', false);
+    const page = bg.scrapeSectionPage(false);
+
+    expect(batch['80001'].some(f => f.type === 'kaltura')).toBe(true);
+    expect(single.some(f => f.type === 'kaltura')).toBe(true);
+    expect(page.some(f => f.type === 'kaltura')).toBe(true);
+  });
+});
+
+describe('Moodle format compatibility — grid format', () => {
+  // format_grid hides sections behind image tiles. Once the user clicks a
+  // tile, Moodle usually reveals the hidden <li.section> in place, so the
+  // section scrapers still apply. The grid DOM itself is picked up by the
+  // popup section scanner, not by scrapeSectionPage.
+  test('scrapeSectionPage finds everything on a grid section page', () => {
+    document.body.innerHTML = `
+      <div id="region-main">
+        <div class="activity modtype_resource">
+          <a href="https://example.edu/mod/resource/view.php?id=900">Brief File</a>
+        </div>
+        <div class="activity modtype_kalvidres">
+          <a href="https://example.edu/mod/kalvidres/view.php?id=901">Lecture Kaltura Video Resource</a>
+        </div>
+        <div class="activity modtype_folder">
+          <a href="https://example.edu/mod/folder/view.php?id=902">Tutorial Pack</a>
+        </div>
+      </div>
+    `;
+    const results = bg.scrapeSectionPage(false);
+    expect(results).toHaveLength(3);
+    expect(results.some(r => r.type === 'kaltura')).toBe(true);
+    expect(results.some(r => r.type === 'folder')).toBe(true);
+    expect(results.some(r => r.type === 'resource')).toBe(true);
+  });
+});
+
+describe('Moodle format compatibility — onetopic (tabbed)', () => {
+  // Research §1.7: only the active tab is in the DOM; navigation is
+  // /course/view.php?id=X&section=N. The popup picks these up through the
+  // .onetopic .nav-tabs selectors; section content still matches our normal
+  // activity scrapers once the tab is loaded.
+  test('active onetopic tab exposes activities to scrapeSectionPage', () => {
+    document.body.innerHTML = `
+      <div class="onetopic">
+        <ul class="nav nav-tabs">
+          <li class="nav-item active"><a href="/course/view.php?id=1&section=1">Week 1</a></li>
+          <li class="nav-item"><a href="/course/view.php?id=1&section=2">Week 2</a></li>
+        </ul>
+        <div class="tab-content">
+          <div class="tab-pane active">
+            <div class="activity modtype_resource">
+              <a href="https://example.edu/mod/resource/view.php?id=1000">Tab Slides File</a>
+            </div>
+            <div class="activity modtype_kalvidres">
+              <a href="https://example.edu/mod/kalvidres/view.php?id=1001">Tab Lecture Kaltura Video Resource</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    const results = bg.scrapeSectionPage(false);
+    expect(results).toHaveLength(2);
+    expect(results.some(r => r.type === 'kaltura')).toBe(true);
+  });
+});
+
+describe('scraper × modtype matrix', () => {
+  // For every scraper variant, every modtype we claim to support must be
+  // detected. A change that removes detection from one cell fires exactly one
+  // test — with a clear message pointing at the scraper and the modtype.
+  const SUPPORTED_MODTYPES = [
+    { klass: 'modtype_resource', type: 'resource', href: '/mod/resource/view.php?id=1', label: 'Slides File' },
+    { klass: 'modtype_folder', type: 'folder', href: '/mod/folder/view.php?id=2', label: 'Tutorial Pack Folder' },
+    { klass: 'modtype_kalvidres', type: 'kaltura', href: '/mod/kalvidres/view.php?id=3', label: 'Lecture Kaltura Video Resource' },
+    { klass: 'modtype_kalvidpres', type: 'kaltura', href: '/mod/kalvidpres/view.php?id=4', label: 'Demo Kaltura Video Presentation' },
+  ];
+
+  const htmlFor = (mods) => `
+    <div id="region-main">
+      <li id="section-1" data-id="55001" data-number="1" class="section main">
+        ${mods.map(m => `<div class="activity ${m.klass}"><a href="https://example.edu${m.href}">${m.label}</a></div>`).join('\n')}
+      </li>
+    </div>
+  `;
+
+  test.each(SUPPORTED_MODTYPES)(
+    'scrapeSectionPage detects $klass',
+    ({ klass, type }) => {
+      document.body.innerHTML = htmlFor([SUPPORTED_MODTYPES.find(m => m.klass === klass)]);
+      const results = bg.scrapeSectionPage(false);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results.some(r => r.type === type)).toBe(true);
+    }
+  );
+
+  test.each(SUPPORTED_MODTYPES)(
+    'scrapeInlineSection detects $klass',
+    ({ klass, type }) => {
+      document.body.innerHTML = htmlFor([SUPPORTED_MODTYPES.find(m => m.klass === klass)]);
+      const results = bg.scrapeInlineSection('55001', false);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results.some(r => r.type === type)).toBe(true);
+    }
+  );
+
+  test.each(SUPPORTED_MODTYPES)(
+    'scrapeAllInlineSections detects $klass',
+    ({ klass, type }) => {
+      document.body.innerHTML = htmlFor([SUPPORTED_MODTYPES.find(m => m.klass === klass)]);
+      const results = bg.scrapeAllInlineSections(['55001'], false);
+      expect(results['55001'].length).toBeGreaterThanOrEqual(1);
+      expect(results['55001'].some(r => r.type === type)).toBe(true);
+    }
+  );
 });

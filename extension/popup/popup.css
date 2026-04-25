@@ -1,3 +1,12 @@
+/*!
+ * KEATS Downloader
+ * https://github.com/Saif-AD/keats_downloader
+ *
+ * Copyright (c) 2026 Saif-AD
+ * Released under the MIT License.
+ * https://github.com/Saif-AD/keats_downloader/blob/main/LICENSE
+ */
+
 /* ========== Light mode (default) ========== */
 :root {
   --red: #c1002a;
@@ -450,12 +459,32 @@ body.dark .toggle input:checked + .toggle-slider {
 
 .save-path strong { color: var(--muted); }
 
+.complete-actions {
+  display: flex;
+  gap: 8px;
+}
+.complete-actions .btn-secondary {
+  flex: 0 0 auto;
+}
+.complete-actions .btn-primary {
+  flex: 1 1 auto;
+}
+
 /* ========== Download Path ========== */
 
 .download-path-row {
   margin: 12px 0 14px;
   padding-top: 12px;
   border-top: 1px solid var(--card-border);
+}
+
+.path-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 1.3px;
+  color: var(--dim);
+  font-weight: 600;
+  margin-bottom: 6px;
 }
 
 .path-bar {
@@ -499,25 +528,70 @@ body.dark .toggle input:checked + .toggle-slider {
 }
 
 .path-bar input {
-  border: none;
-  background: none;
+  border: 1px dashed var(--log-border);
+  background: var(--card-bg);
   font-size: 11.5px;
   color: var(--text);
   font-weight: 600;
-  padding: 0;
+  padding: 2px 6px;
   outline: none;
   min-width: 40px;
   width: auto;
   font-family: inherit;
+  border-radius: 4px;
+  cursor: text;
+}
+
+.path-bar input:hover {
+  border-color: var(--red);
+  border-style: solid;
 }
 
 .path-bar input:focus {
   color: var(--red);
+  border-color: var(--red);
+  border-style: solid;
 }
 
 .path-bar input::placeholder {
   color: var(--dim);
   font-weight: 400;
+}
+
+.overwrite-row {
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+}
+
+.option-hint {
+  margin: 2px 28px 4px;
+  font-size: 10.5px;
+  color: var(--dim);
+  line-height: 1.3;
+  font-style: italic;
+}
+
+.last-run-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--card-border);
+  font-size: 11px;
+}
+
+.last-run-summary {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.overwrite-row span {
+  color: var(--muted);
 }
 
 /* ========== Library ========== */

@@ -5,4 +5,6 @@ venv/
 selenium/
 *.db
 node_modules/
-.claude/
+# local test artefacts
+*.mp4
+
