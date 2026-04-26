@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/alcfjagceodkndgakfpejoilijfcedhp"><img src="https://img.shields.io/badge/Chrome_Web_Store-install-c1002a?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Chrome Web Store" /></a>
-  <a href="../../releases"><img src="https://img.shields.io/badge/version-1.4.1-c1002a?style=for-the-badge" alt="Version" /></a>
+  <a href="../../releases"><img src="https://img.shields.io/badge/version-1.5.0-c1002a?style=for-the-badge" alt="Version" /></a>
   <a href="../../blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-c1002a?style=for-the-badge" alt="MIT License" /></a>
 </p>
 
@@ -77,10 +77,23 @@ KEATS Downloads/
       Coursework Brief/
         brief.pdf
     Lecture Recordings/
-      Lecture - 20 Jan 2026.url
+      Lecture - 20 Jan 2026.mp4
 ```
 
 Subfolders are created from section headings on the course page — lectures, tutorials, assessments, and custom sections are all detected automatically.
+
+---
+
+## a small note from me 😅
+
+sorry, you have to use chrome for this — cba to make a proper desktop app. that's the honest reason.
+if the actual live extension on the store isn't fully updated to repo, just unload the extension folder onto chrome://extensions/.
+
+might work fine at other unis too if your moodle is paired with kaltura for embedded videos and/or echo360 for lecture captures — that covers a lot of uk/aus/canadian unis. give it a go on your course page; if anything misbehaves, [open an issue](../../issues) with the run log and i'll have a look.
+
+it's all open source under MIT — if you want to build a proper native mac/windows/linux app, port it to firefox/safari, rewrite it in rust because chrome extensions feel like a war crime — fork it, rip out the chrome bits, take whatever you need. just dont rip it off as your own, credit appreciated ofc<3
+
+— Saif
 
 ---
 
@@ -94,7 +107,7 @@ Subfolders are created from section headings on the course page — lectures, tu
 | **Smart folders** | Lectures, tutorials, assessments sorted automatically |
 | **Parallel downloads** | 3 concurrent downloads with automatic retry |
 | **Kaltura videos** | Embedded lecture videos → direct MP4 download |
-| **Echo360 captures** | Recorded lectures → clickable `.url` shortcut (opens in browser) |
+| **Echo360 captures** | Recorded lectures → direct MP4 download (composite slides + camera) |
 | **Folder expansion** | Moodle folders unpacked and downloaded |
 | **Download library** | See all courses you've downloaded with file counts |
 | **Custom save path** | Choose your download folder name |
@@ -125,17 +138,9 @@ Works across all KEATS course layouts:
 | Media (M4A, MP3, MP4, WMV) | ✅ |
 | Moodle folders | ✅ Expanded |
 | Kaltura videos | ✅ Direct MP4 |
-| Echo360 lecture captures | ✅ Clickable `.url` shortcut |
+| Echo360 lecture captures | ✅ Direct MP4 (falls back to clickable `.url` shortcut if blocked) |
 | External URLs | Skipped |
 | Quizzes, forums, assignments | Skipped |
-
----
-
-## Other Universities
-
-Works on **any Moodle-based LMS** — not just KEATS. Navigate to a course page and click the icon.
-
-If your university's format isn't supported, [open an issue](../../issues).
 
 ---
 
@@ -150,6 +155,14 @@ Open source — pull requests welcome.
 ---
 
 ## Changelog
+
+### v1.5.0
+- **Echo360 lectures download as direct MP4** — pulled straight from the Echo360 CDN as progressive MP4 files. Default download is the **slide track** — the clean digital slide capture with lecturer audio, which is what students need for revision. No DRM, no segment muxing, no ffmpeg.
+- **Auto-fallback for lectures without a slide track** — some rooms only have camera capture; the extension transparently falls back to the composite (camera angles side-by-side), then to the audio-only track, then to a clickable `.url` shortcut.
+- **Two optional sub-tracks** under the Echo360 option, ticked independently:
+  - **Composite (camera angles)** — adds the side-by-side room camera view (~500 MB per lecture)
+  - **Audio-only track** — small ~30 MB file per lecture, ideal for listening alongside your slide notes
+- **Disk dedup applies to Echo360 too** — re-running on a course skips any lecture MP4 already on disk.
 
 ### v1.4.1
 - **Kaltura videos download as direct MP4** — weekly lecture videos embedded as Kaltura now save straight to disk. No browser playback, no save dialog.

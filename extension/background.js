@@ -92,66 +92,310 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+// Returns a structured snapshot of activities visible in the course-page DOM.
+// Activities in collapsed topcoll/topics sections are still in the DOM (only
+// CSS-hidden), so a single querySelectorAll catches them without needing to
+// click toggles. For grid/tiles/onetopic formats the landing page only shows
+// section tiles — we expose those URLs so the caller can fetch each section
+// page and merge results.
 function scrapeFileHrefsLightweight() {
   const h1 = document.querySelector('h1');
   const courseName = h1 ? h1.textContent.trim() : document.title.trim();
-  const hrefs = new Set();
 
-  const selectors = [
-    '.activity.modtype_resource a[href*="/mod/resource/"]',
-    '.activity.modtype_folder a[href*="/mod/folder/"]',
-    '.activity.modtype_kalvidres a[href*="/mod/kalvid"]',
-    '.activity.modtype_kalvidpres a[href*="/mod/kalvid"]',
+  let format = 'unknown';
+  for (const cls of (document.body && document.body.classList) || []) {
+    if (cls.startsWith('format-')) { format = cls.replace('format-', ''); break; }
+  }
+
+  const cleanName = (txt) => (txt || '').trim().replace(/\n+/g, ' ')
+    .replace(/\s*(File|Folder|URL|Page|Kaltura Video (Resource|Presentation)|External tool)\s*/gi, '')
+    .replace(/\s+/g, ' ').trim();
+
+  const activities = [];
+  const els = document.querySelectorAll(
+    '.activity.modtype_resource, ' +
+    '.activity.modtype_folder, ' +
+    '.activity.modtype_kalvidres, ' +
+    '.activity.modtype_kalvidpres, ' +
+    '.activity.modtype_lti'
+  );
+  for (const el of els) {
+    let type = 'resource';
+    let link = null;
+    if (el.classList.contains('modtype_resource')) {
+      type = 'resource';
+      link = el.querySelector('a[href*="/mod/resource/"]');
+    } else if (el.classList.contains('modtype_folder')) {
+      type = 'folder';
+      link = el.querySelector('a[href*="/mod/folder/"]');
+    } else if (el.classList.contains('modtype_kalvidres') || el.classList.contains('modtype_kalvidpres')) {
+      type = 'kaltura';
+      link = el.querySelector('a[href*="/mod/kalvid"]');
+    } else if (el.classList.contains('modtype_lti')) {
+      type = 'lti';
+      link = el.querySelector('a[href*="/mod/lti/"]');
+    }
+    if (!link || !link.href) continue;
+    const name = cleanName(el.innerText);
+    if (!name || name.length < 2) continue;
+    activities.push({
+      type,
+      href: link.href.split('#')[0],
+      name,
+    });
+  }
+
+  // Section subpage URLs — only meaningful when sections live on separate
+  // pages (grid/tiles/onetopic/flexsections). For inline formats this list is
+  // ignored.
+  const sectionUrls = new Set();
+  const tileSelectors = [
+    'a[href*="/course/view.php"][href*="section="]',
+    'a[href*="/course/view.php"][href*="topicid="]',
+    '.tile a[href*="/course/view.php"]',
+    '.section_link a',
   ];
-
-  for (const sel of selectors) {
-    for (const link of document.querySelectorAll(sel)) {
-      hrefs.add(link.href.split('#')[0].split('?')[0]);
+  for (const sel of tileSelectors) {
+    for (const a of document.querySelectorAll(sel)) {
+      try {
+        const u = new URL(a.href);
+        if (!/\/course\/view\.php/.test(u.pathname)) continue;
+        if (u.searchParams.has('section') || u.searchParams.has('topicid')) {
+          sectionUrls.add(u.toString().split('#')[0]);
+        }
+      } catch (e) { /* ignore malformed */ }
     }
   }
 
-  return { courseName, hrefs: [...hrefs] };
+  return { courseName, format, activities, sectionUrls: [...sectionUrls] };
 }
 
-async function checkForNewFiles(tabId) {
-  const result = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: scrapeFileHrefsLightweight,
-  });
+// Runs in the tab's page context so cookies attach automatically. Fetches a
+// list of section subpage URLs in parallel, parses each as HTML, extracts
+// activities. Used for grid/tiles courses where the landing page is empty.
+function fetchSectionActivitiesInPage(urls) {
+  const cleanName = (txt) => (txt || '').trim().replace(/\n+/g, ' ')
+    .replace(/\s*(File|Folder|URL|Page|Kaltura Video (Resource|Presentation)|External tool)\s*/gi, '')
+    .replace(/\s+/g, ' ').trim();
 
-  const data = result[0]?.result;
-  if (!data || !data.courseName || data.hrefs.length === 0) {
+  const parseDoc = (html) => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const out = [];
+    const els = doc.querySelectorAll(
+      '.activity.modtype_resource, ' +
+      '.activity.modtype_folder, ' +
+      '.activity.modtype_kalvidres, ' +
+      '.activity.modtype_kalvidpres, ' +
+      '.activity.modtype_lti'
+    );
+    for (const el of els) {
+      let type = 'resource';
+      let link = null;
+      if (el.classList.contains('modtype_resource')) {
+        type = 'resource'; link = el.querySelector('a[href*="/mod/resource/"]');
+      } else if (el.classList.contains('modtype_folder')) {
+        type = 'folder'; link = el.querySelector('a[href*="/mod/folder/"]');
+      } else if (el.classList.contains('modtype_kalvidres') || el.classList.contains('modtype_kalvidpres')) {
+        type = 'kaltura'; link = el.querySelector('a[href*="/mod/kalvid"]');
+      } else if (el.classList.contains('modtype_lti')) {
+        type = 'lti'; link = el.querySelector('a[href*="/mod/lti/"]');
+      }
+      if (!link || !link.href) continue;
+      const name = cleanName(el.innerText || el.textContent);
+      if (!name || name.length < 2) continue;
+      out.push({ type, href: link.href.split('#')[0], name });
+    }
+    return out;
+  };
+
+  return Promise.all(urls.map(async (url) => {
+    try {
+      const r = await fetch(url, { credentials: 'include' });
+      if (!r.ok) return [];
+      const html = await r.text();
+      return parseDoc(html);
+    } catch (e) { return []; }
+  })).then((arrs) => {
+    const merged = [];
+    for (const a of arrs) merged.push(...a);
+    return merged;
+  });
+}
+
+// Course content rarely changes mid-session — once we've done a deep scan we
+// reuse the result for this long before re-fetching. Keeps the badge
+// responsive without hammering KEATS on every tab reload.
+const NEW_FILES_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_DEEP_SCAN_SECTIONS = 20;
+
+// Build a matchable identity set from download history for one course.
+// Match in two dimensions because the underlying href changes shape between
+// what's on the page and what we record in history (Kaltura is the obvious
+// case: page has /mod/kalvidres/view.php?id=… but history holds the resolved
+// playManifest CDN URL). Falling back to lowercased activity name catches
+// every case where href shape differs but the title is stable.
+// Strip the URL fragment (#anchor) but keep the query string. Moodle uses the
+// query string to carry the unique activity id (e.g. ?id=99999) — stripping
+// it would collapse every mod/resource/view.php into one identical string and
+// the badge would think a course only ever has one resource. We do strip
+// known-noise params like &forcedownload=1 that some Moodle download links
+// occasionally add.
+function normaliseHref(href) {
+  if (!href) return '';
+  let out = href.split('#')[0];
+  // Strip noise params that don't change resource identity
+  out = out.replace(/[?&]forcedownload=\d+/g, '').replace(/[?&]redirect=\d+/g, '');
+  // Tidy up if stripping left us with a trailing ? or doubled &
+  out = out.replace(/\?&/, '?').replace(/\?$/, '');
+  return out;
+}
+
+function buildKnownIdentity(history, courseName) {
+  const knownHrefs = new Set();
+  const knownNames = new Set();
+  for (const [key, entry] of Object.entries(history)) {
+    if (!entry || entry.course !== courseName) continue;
+    const parts = key.split('|');
+    if (parts.length >= 4) {
+      const href = normaliseHref(parts.slice(3).join('|'));
+      if (href) knownHrefs.add(href);
+    }
+    if (entry.name) {
+      const norm = String(entry.name).toLowerCase().replace(/\s+/g, ' ').trim();
+      if (norm) knownNames.add(norm);
+    }
+  }
+  return { knownHrefs, knownNames };
+}
+
+function activityIsKnown(activity, knownHrefs, knownNames) {
+  const href = normaliseHref(activity.href || '');
+  if (href && knownHrefs.has(href)) return true;
+  const name = (activity.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (name && knownNames.has(name)) return true;
+  return false;
+}
+
+async function checkForNewFiles(tabId, opts = {}) {
+  const forceRefresh = opts.forceRefresh === true;
+
+  let scrape;
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: scrapeFileHrefsLightweight,
+    });
+    scrape = result[0]?.result;
+  } catch (e) {
+    return; // tab closed or restricted page
+  }
+
+  if (!scrape || !scrape.courseName) {
     chrome.action.setBadgeText({ text: '', tabId });
     return;
+  }
+
+  const courseName = sanitize(cleanCourseName(scrape.courseName) || scrape.courseName).substring(0, 120);
+  const tabInfo = await chrome.tabs.get(tabId).catch(() => null);
+  const tabUrl = tabInfo?.url ? tabInfo.url.split('#')[0] : '';
+  const cacheKey = tabUrl ? `newFilesCache:${tabUrl}` : null;
+
+  // Decide whether the landing-page DOM is enough or whether we need to walk
+  // section subpages (grid/tiles/onetopic etc).
+  const needsDeepScan =
+    scrape.sectionUrls.length > 0 &&
+    (scrape.format === 'grid' || scrape.format === 'tiles' ||
+     scrape.format === 'onetopic' || scrape.format === 'flexsections' ||
+     scrape.activities.length === 0);
+
+  let activities = scrape.activities;
+  let usedCache = false;
+
+  if (cacheKey && !forceRefresh) {
+    const stored = (await chrome.storage.session.get(cacheKey))[cacheKey];
+    if (stored && Date.now() - stored.scannedAt < NEW_FILES_CACHE_TTL_MS) {
+      activities = stored.activities || [];
+      usedCache = true;
+    }
+  }
+
+  if (!usedCache && needsDeepScan) {
+    try {
+      const subpageUrls = scrape.sectionUrls.slice(0, MAX_DEEP_SCAN_SECTIONS);
+      const fetchResult = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [subpageUrls],
+        func: fetchSectionActivitiesInPage,
+      });
+      const fetched = fetchResult[0]?.result || [];
+      const seen = new Map();
+      for (const a of [...activities, ...fetched]) {
+        const key = a.href || a.name;
+        if (key && !seen.has(key)) seen.set(key, a);
+      }
+      activities = [...seen.values()];
+    } catch (e) {
+      // Fall through with whatever the landing page gave us.
+    }
+  }
+
+  if (!usedCache && cacheKey) {
+    try {
+      await chrome.storage.session.set({
+        [cacheKey]: { activities, scannedAt: Date.now() },
+      });
+    } catch (e) { /* session storage best-effort */ }
   }
 
   const history = await getDownloadHistory();
-  const courseName = sanitize(cleanCourseName(data.courseName) || data.courseName).substring(0, 120);
+  const completions = await getCourseCompletions();
+  const historyCount = Object.values(history).filter(e => e && e.course === courseName).length;
+  const { knownHrefs, knownNames } = buildKnownIdentity(history, courseName);
 
-  // Build set of known hrefs for this course
-  const knownHrefs = new Set();
-  for (const [key, entry] of Object.entries(history)) {
-    if (entry.course === courseName) {
-      const parts = key.split('|');
-      if (parts.length >= 4) {
-        const href = parts.slice(3).join('|').split('#')[0].split('?')[0];
-        knownHrefs.add(href);
-      }
-    }
+  // Lazy migration for users upgrading from a pre-completion-tracking
+  // release. Anything with substantial history (≥20 entries for this
+  // course) is almost certainly a course that was fully downloaded at
+  // some point — we backfill a completion record so the badge keeps
+  // working as before. Anything below the threshold is more likely
+  // partial/cancelled and we leave it un-migrated; it'll either get a
+  // real completion next time it's re-run, or stay silent in the
+  // meantime (the safe default).
+  let hasCompleted = !!completions[courseName];
+  if (!hasCompleted && historyCount >= 20) {
+    await markCourseCompleted(courseName, historyCount);
+    hasCompleted = true;
   }
 
-  // If no history for this course, don't show badge (first time)
-  if (knownHrefs.size === 0) {
+  // Only fire the badge when there's a meaningful baseline. Two "no badge"
+  // cases:
+  //  1. No history at all → first visit, nothing to compare against.
+  //  2. Has partial history but no completed run on record → e.g. user
+  //     started downloading then cancelled. The remaining files aren't NEW,
+  //     they're just not-yet-downloaded. Saying "96 new since last download"
+  //     would be a lie because there was no last download — there was an
+  //     abandoned run. The library card already shows "Last run (cancelled)
+  //     · 5 ok" so the user has the right context there.
+  if ((knownHrefs.size === 0 && knownNames.size === 0) || !hasCompleted) {
     chrome.action.setBadgeText({ text: '', tabId });
+    await chrome.storage.session.set({
+      [`newFiles:${tabId}`]: {
+        count: 0,
+        total: activities.length,
+        courseName,
+        items: [],
+        timestamp: Date.now(),
+        firstVisit: knownHrefs.size === 0 && knownNames.size === 0,
+        partialOnly: !hasCompleted && (knownHrefs.size > 0 || knownNames.size > 0),
+      },
+    });
     return;
   }
 
-  // Count new files
-  let newCount = 0;
-  for (const href of data.hrefs) {
-    const norm = href.split('#')[0].split('?')[0];
-    if (!knownHrefs.has(norm)) newCount++;
+  const newItems = [];
+  for (const a of activities) {
+    if (!activityIsKnown(a, knownHrefs, knownNames)) newItems.push(a);
   }
+  const newCount = newItems.length;
 
   if (newCount > 0) {
     chrome.action.setBadgeBackgroundColor({ color: '#c1002a', tabId });
@@ -160,9 +404,15 @@ async function checkForNewFiles(tabId) {
     chrome.action.setBadgeText({ text: '', tabId });
   }
 
-  // Store for popup to read
   await chrome.storage.session.set({
-    [`newFiles:${tabId}`]: { count: newCount, courseName, timestamp: Date.now() }
+    [`newFiles:${tabId}`]: {
+      count: newCount,
+      total: activities.length,
+      courseName,
+      items: newItems.slice(0, 50),
+      timestamp: Date.now(),
+      firstVisit: false,
+    },
   });
 }
 
@@ -175,6 +425,30 @@ async function getDownloadHistory() {
 
 async function saveDownloadHistory(history) {
   await chrome.storage.local.set({ downloadHistory: history });
+}
+
+// Course completion tracking. Distinct from download history: we record the
+// timestamp of every run that actually finished (status === 'complete', not
+// 'cancelled' or 'error'). The new-files badge only fires after a course has
+// at least one completion on record — without this gate, cancelling a run
+// halfway through a fresh course would leave the entire un-downloaded
+// remainder showing up as "new files since last download" forever, which is
+// misleading because they never appeared after a download — the download
+// just never finished. Better to stay quiet until the user has done a real
+// full pass and there's a meaningful baseline to compare against.
+async function getCourseCompletions() {
+  const data = await chrome.storage.local.get('courseCompletions');
+  return data.courseCompletions || {};
+}
+
+async function markCourseCompleted(courseName, fileCount) {
+  if (!courseName) return;
+  const completions = await getCourseCompletions();
+  completions[courseName] = {
+    completedAt: Date.now(),
+    fileCount: typeof fileCount === 'number' ? fileCount : 0,
+  };
+  await chrome.storage.local.set({ courseCompletions: completions });
 }
 
 // Persist the log of the most recent run so users can always review or debug
@@ -207,8 +481,15 @@ async function getLastRun() {
 }
 
 function fileKey(courseName, file) {
-  // Unique key: course + section + category + filename href
-  return `${courseName}|${file.sectionName || ''}|${file.category || ''}|${file.href}`;
+  // Unique key: course + section + category + href. We prefer the page-level
+  // href (file.originalHref) over any resolved CDN URL so that the new-files
+  // detector — which only sees what's in the DOM — can match its scraped
+  // hrefs against this history. For Kaltura the page DOM has
+  // /mod/kalvidres/view.php?id=… while the CDN URL is a one-off playManifest
+  // signed URL, so without this preference the badge would always claim
+  // every Kaltura video is "new" no matter how many times it was downloaded.
+  const href = file.originalHref || file.href;
+  return `${courseName}|${file.sectionName || ''}|${file.category || ''}|${href}`;
 }
 
 async function markDownloaded(courseName, file, downloadPath) {
@@ -315,7 +596,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       return true; // async response
     case 'CHECK_NEW_FILES':
-      checkForNewFiles(msg.tabId).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+      checkForNewFiles(msg.tabId, { forceRefresh: msg.forceRefresh === true })
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
       return true;
   }
   return false;
@@ -397,6 +680,9 @@ async function startDownload(_tabId, courseInfo, options = {}) {
   const doFolders = options.folders !== false;
   const doOptional = options.optional === true;
   state.overwrite = options.overwrite === true;
+  // Pass-through flags read inside the Echo360 phase loop closure.
+  options.echo360Composite = options.echo360Composite === true;
+  options.echo360Audio = options.echo360Audio === true;
 
   const courseName = sanitize(cName).substring(0, 120);
   const downloadFolder = sanitize(options.downloadPath || 'KEATS Downloads');
@@ -475,6 +761,7 @@ async function startDownload(_tabId, courseInfo, options = {}) {
               try {
                 const resolved = await resolveKalturaVideo(tempTabId, file);
                 if (resolved) {
+                  file.originalHref = file.href;
                   file.href = resolved;
                   file.type = 'kalturaDownload';
                   expandedFiles.push(file);
@@ -544,6 +831,7 @@ async function startDownload(_tabId, courseInfo, options = {}) {
               try {
                 const resolved = await resolveKalturaVideo(tempTabId, file);
                 if (resolved) {
+                  file.originalHref = file.href;
                   file.href = resolved;
                   file.type = 'kalturaDownload';
                   expandedFiles.push(file);
@@ -627,29 +915,163 @@ async function startDownload(_tabId, courseInfo, options = {}) {
         }
 
         addLog(`Found ${syllabusData.length} Echo360 recordings`);
-        state.currentFile = `Saving ${syllabusData.length} Echo360 shortcuts...`;
+        state.currentFile = `Resolving ${syllabusData.length} Echo360 lectures...`;
         broadcastProgress();
 
         const echoHost = new URL(currentUrl).host;
+        const cdnHost = echo360ContentHost(echoHost);
+
+        // Pull the institutionId out of the Echo360 page. The ECHO_JWT
+        // cookie is usually HttpOnly so document.cookie can't see it; the
+        // PLAY_SESSION cookie embeds an `institution=<uuid>` field in plain
+        // form, and the same UUID appears in dozens of places in the
+        // classroom page's HTML/JS bootstrap. Try each source in turn so
+        // the extension works on any Echo360 deployment.
+        let institutionId = null;
+        try {
+          const probeResult = await chrome.scripting.executeScript({
+            target: { tabId: tempTabId },
+            func: () => {
+              // 1. ECHO_JWT cookie (often HttpOnly — usually unavailable)
+              const ej = document.cookie.match(/ECHO_JWT=([^;]+)/);
+              if (ej) return { source: 'echo_jwt', value: ej[1] };
+
+              // 2. PLAY_SESSION cookie body has institution=<uuid>
+              const ps = document.cookie.match(/PLAY_SESSION=[^;]*?institution=([a-f0-9-]{36})/i);
+              if (ps) return { source: 'play_session', value: ps[1] };
+
+              // 3. Page source — institutionId appears in JSON bootstraps
+              //    and in REST URLs the player uses
+              const html = document.documentElement.outerHTML;
+              const inst = html.match(/institutionId["':\s]+["']?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+              if (inst) return { source: 'page', value: inst[1] };
+
+              return null;
+            },
+          });
+          const probe = probeResult[0]?.result;
+          if (probe) {
+            if (probe.source === 'echo_jwt') {
+              institutionId = parseEcho360InstitutionId(probe.value);
+            } else if (/^[a-f0-9-]{36}$/i.test(probe.value)) {
+              institutionId = probe.value;
+            }
+          }
+        } catch (e) { /* will fall back below */ }
+
+        // Final fallback for KCL — echo360.org.uk is exclusively KCL within
+        // KEATS, so the institutionId is stable. Other universities will
+        // either have hit one of the page-scan branches above or land on
+        // the .url shortcut path.
+        if (!institutionId && /(^|\.)echo360\.org\.uk$/i.test(echoHost)) {
+          institutionId = '86e349d2-638d-4bf7-9b75-0b259b92e283';
+        }
+
+        if (!institutionId) {
+          addLog(`  Could not resolve Echo360 institution ID — falling back to .url shortcuts`);
+        }
+
         for (const recording of syllabusData) {
           if (state.cancelled) break;
           if (!recording.mediaId || !recording.isAvailable) continue;
           if (!recording.lessonId) continue;
 
-          // Direct MP4 download for institutional Echo360 content is blocked by
-          // Widevine-protected DASH streams. Save a clickable .url shortcut
-          // pointing at the lecture page so students can open it in their
-          // authenticated browser session. Automated extraction is tracked for
-          // a future release.
           const dateStr = recording.date || 'Unknown Date';
           const lessonUrl = `https://${echoHost}/lesson/${recording.lessonId}/classroom`;
-          allFiles.push({
-            name: `${recording.name} - ${dateStr}`,
-            href: lessonUrl,
-            sectionName: 'Lecture Recordings',
-            courseName: courseName,
-            type: 'urlShortcut',
-          });
+
+          // Echo360 publishes up to three tracks per lecture:
+          //   s0q1 — audio-only stream (no video frame)
+          //   s1q1 — the slide recording: clean digital slide capture +
+          //          lecturer audio. The view labelled "Video 1" in the
+          //          player and what students need for revision.
+          //   s2q1 — server-rendered composite (e.g. side-by-side of
+          //          slides and camera).
+          //
+          // Default download is the slide track. Auto-fall through to
+          // composite, then audio-only, then a clickable .url shortcut.
+          // If "Echo360 all tracks" is on we queue every probe-passing
+          // track as separate files.
+          const probeStream = async (stream) => {
+            const url = buildEcho360Url(cdnHost, institutionId, recording.mediaId, stream);
+            try {
+              const probeResult = await chrome.scripting.executeScript({
+                target: { tabId: tempTabId },
+                func: async (u) => {
+                  try {
+                    const resp = await fetch(u, { method: 'HEAD', credentials: 'include', redirect: 'follow' });
+                    return { ok: resp.ok, status: resp.status };
+                  } catch (e) {
+                    return { ok: false, error: String(e && e.message || e) };
+                  }
+                },
+                args: [url],
+              });
+              const r = probeResult[0]?.result;
+              return r && r.ok ? url : null;
+            } catch (e) {
+              return null;
+            }
+          };
+
+          let queued = false;
+          if (institutionId && cdnHost) {
+            const STREAM_LABEL = { s1q1: 'slides', s2q1: 'composite', s0q1: 'audio' };
+            // Priority order for the primary download: slides → composite
+            // → audio-only. We always probe in this order and pick the
+            // first track that's actually available for this lecture.
+            const primaryOrder = ['s1q1', 's2q1', 's0q1'];
+            let primaryStream = null;
+            let primaryUrl = null;
+            for (const stream of primaryOrder) {
+              const url = await probeStream(stream);
+              if (url) { primaryStream = stream; primaryUrl = url; break; }
+            }
+
+            if (primaryStream) {
+              allFiles.push({
+                name: `${recording.name} - ${dateStr}`,
+                href: primaryUrl,
+                sectionName: 'Lecture Recordings',
+                courseName: courseName,
+                type: 'echo360Mp4',
+              });
+              addLog(`  Echo360 ready (${STREAM_LABEL[primaryStream]}): ${recording.name} - ${dateStr}`);
+              queued = true;
+
+              // Optional extra tracks. Each is independently toggleable so
+              // students can keep just the audio if they only want to
+              // listen alongside notes, or grab the camera angles if they
+              // need the room view, without paying for both.
+              const extras = [];
+              if (options.echo360Composite && primaryStream !== 's2q1') extras.push('s2q1');
+              if (options.echo360Audio && primaryStream !== 's0q1') extras.push('s0q1');
+
+              for (const stream of extras) {
+                const url = await probeStream(stream);
+                if (!url) continue;
+                allFiles.push({
+                  name: `${recording.name} - ${dateStr} (${STREAM_LABEL[stream]})`,
+                  href: url,
+                  sectionName: 'Lecture Recordings',
+                  courseName: courseName,
+                  type: 'echo360Mp4',
+                });
+                addLog(`    + extra track: ${STREAM_LABEL[stream]}`);
+              }
+            } else {
+              addLog(`  Echo360 MP4 unavailable for ${recording.name} — saving shortcut`);
+            }
+          }
+
+          if (!queued) {
+            allFiles.push({
+              name: `${recording.name} - ${dateStr}`,
+              href: lessonUrl,
+              sectionName: 'Lecture Recordings',
+              courseName: courseName,
+              type: 'urlShortcut',
+            });
+          }
         }
       }
       state.currentFile = '';
@@ -662,7 +1084,7 @@ async function startDownload(_tabId, courseInfo, options = {}) {
     // ==================== Phase 3: Download files ====================
     const downloadable = allFiles.filter(f =>
       f.type === 'resource' || f.type === 'folderFile' || f.type === 'echo360' ||
-      f.type === 'kalturaDownload' || f.type === 'urlShortcut'
+      f.type === 'kalturaDownload' || f.type === 'echo360Mp4' || f.type === 'urlShortcut'
     );
 
     // Filter out already-downloaded files using two checks:
@@ -743,6 +1165,9 @@ async function startDownload(_tabId, courseInfo, options = {}) {
     state.currentFile = '';
     addLog(`\nDone! ${state.downloadedFiles} downloaded, ${state.failedFiles} failed.${skippedFiles > 0 ? ` ${skippedFiles} skipped (already downloaded).` : ''}`);
     stopKeepAlive();
+    if (state.status === 'complete') {
+      await markCourseCompleted(courseName, state.downloadedFiles + skippedFiles);
+    }
     await saveLastRun();
     broadcastProgress();
 
@@ -1250,6 +1675,51 @@ function buildKalturaDownloadUrl(entryId, partnerId) {
   return `https://cdnapisec.kaltura.com/p/${partnerId}/sp/${partnerId}00/playManifest/entryId/${entryId}/format/download/protocol/https/flavorParamIds/0`;
 }
 
+// ==================== Echo360 MP4 resolution ====================
+
+// Echo360 streams come from a CDN at content.echo360.{tld} as plain
+// progressive MP4 with byte-range support. Authentication is via CloudFront
+// signed cookies that the user's logged-in browser already holds for the
+// echo360 domain — Chrome attaches them on chrome.downloads.download with
+// no extra work required.
+//
+// The path layout is:
+//   https://content.echo360.{tld}/0000.{instId}/{mediaId}/1/{stream}.mp4
+//
+// where {stream} is one of:
+//   s0q1 — camera feed
+//   s1q1 — slides / screen capture
+//   s2q1 — composite (the side-by-side view the player shows by default)
+function buildEcho360Url(host, institutionId, mediaId, stream) {
+  // Host is the CDN host that Echo360 uses for content delivery, derived
+  // from the user's session host (e.g. echo360.org.uk -> content.echo360.org.uk).
+  return `https://${host}/0000.${institutionId}/${mediaId}/1/${stream}.mp4`;
+}
+
+function echo360ContentHost(sessionHost) {
+  if (!sessionHost) return null;
+  if (sessionHost.startsWith('content.')) return sessionHost;
+  return 'content.' + sessionHost;
+}
+
+// Pulls the institution UUID out of an ECHO_JWT cookie. The JWT body has
+// a `content.institutionId` field. Falls through to null if the cookie
+// isn't present or can't be decoded — caller will fall back to the .url
+// shortcut path.
+function parseEcho360InstitutionId(jwtString) {
+  if (!jwtString || typeof jwtString !== 'string') return null;
+  const parts = jwtString.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const payloadB64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payloadB64 + '=='.slice(0, (4 - payloadB64.length % 4) % 4);
+    const payload = JSON.parse(atob(padded));
+    return payload?.content?.institutionId || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Fetches the kalvidres view page (from the tab's page context so KEATS
 // cookies are automatically attached) and returns a direct MP4 playManifest
 // URL. Falls through to null if the page can't be parsed — caller logs and
@@ -1372,7 +1842,7 @@ async function downloadSingleFile(file, basePath) {
     const fetched = await fetchFileBlob(url);
     if (fetched.filename) filename = fetched.filename;
     downloadUrl = await blobToDataUrl(fetched.blob);
-  } else if (file.type === 'kalturaDownload' || file.type === 'echo360') {
+  } else if (file.type === 'kalturaDownload' || file.type === 'echo360' || file.type === 'echo360Mp4') {
     // Video files: download directly from CDN (too large for data URL)
     filename = sanitize(file.name) + '.mp4';
     downloadUrl = url;
@@ -1496,7 +1966,7 @@ function sanitize(name) {
 function predictFilename(file) {
   if (!file) return null;
   if (file.type === 'urlShortcut') return sanitize(file.name) + '.url';
-  if (file.type === 'kalturaDownload' || file.type === 'echo360') {
+  if (file.type === 'kalturaDownload' || file.type === 'echo360' || file.type === 'echo360Mp4') {
     return sanitize(file.name) + '.mp4';
   }
   return null;
@@ -1639,7 +2109,11 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     sanitize, cleanCourseName, predictFilename, addLog, sleep, downloadWithRetry, fileKey, blobToDataUrl, fetchFileBlob,
     buildUrlShortcut, parseKalturaIdsFromHtml, buildKalturaDownloadUrl, buildExistingDownloadSet,
+    buildEcho360Url, echo360ContentHost, parseEcho360InstitutionId,
     scrapeSectionPage, scrapeInlineSection, scrapeAllInlineSections, scrapeFolderPage,
+    scrapeFileHrefsLightweight, fetchSectionActivitiesInPage,
+    buildKnownIdentity, activityIsKnown, normaliseHref,
+    getCourseCompletions, markCourseCompleted,
     scrapeEcho360LTI, isMoodleCoursePage: undefined,
     get state() { return state; },
     set state(s) { state = s; },

@@ -572,6 +572,11 @@ body.dark .toggle input:checked + .toggle-slider {
   font-style: italic;
 }
 
+.checkbox-row.indent {
+  margin-left: 22px;
+  font-size: 11.5px;
+}
+
 .last-run-row {
   display: flex;
   justify-content: space-between;

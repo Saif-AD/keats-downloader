@@ -344,19 +344,34 @@ async function init() {
   }
   loadLibrary();
 
-  // Check for new files
+  // Force a fresh accurate scan whenever the popup opens — costs ~1-2s for
+  // grid-format courses but means the count we show is from a real walk of
+  // every section, not a stale read of just the landing page.
   try {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (activeTab) {
-      await sendBg({ type: 'CHECK_NEW_FILES', tabId: activeTab.id });
+      await sendBg({ type: 'CHECK_NEW_FILES', tabId: activeTab.id, forceRefresh: true });
       const sessionData = await chrome.storage.session.get(`newFiles:${activeTab.id}`);
       const info = sessionData[`newFiles:${activeTab.id}`];
-      if (info && info.count > 0) {
-        const el = $('#new-files-badge');
-        if (el) {
-          el.textContent = `${info.count} new file${info.count > 1 ? 's' : ''} since last download`;
-          el.classList.remove('hidden');
-        }
+      const el = $('#new-files-badge');
+      if (el && info && info.partialOnly) {
+        // Course has some history but no full completed run yet (likely
+        // cancelled mid-way). Don't claim anything is "new" — instead nudge
+        // toward resuming. No specific count, since the count would just be
+        // "everything not yet saved" which isn't actionable as a new-files
+        // signal.
+        el.textContent = 'previous run was cancelled — pick up where you left off';
+        el.title = '';
+        el.classList.remove('hidden');
+      } else if (el && info && !info.firstVisit && info.count > 0) {
+        const items = Array.isArray(info.items) ? info.items : [];
+        const preview = items.slice(0, 3).map(i => i.name).join(', ');
+        const more = items.length > 3 ? ` (+${items.length - 3} more)` : '';
+        el.textContent = `${info.count} new file${info.count > 1 ? 's' : ''} since last download`;
+        el.title = preview ? `${preview}${more}` : '';
+        el.classList.remove('hidden');
+      } else if (el) {
+        el.classList.add('hidden');
       }
     }
   } catch (e) {}
@@ -382,6 +397,8 @@ $('#btn-download').addEventListener('click', async () => {
       materials: $('#opt-materials').checked,
       videos: $('#opt-videos').checked,
       captures: $('#opt-captures').checked,
+      echo360Composite: $('#opt-captures-composite')?.checked === true,
+      echo360Audio: $('#opt-captures-audio')?.checked === true,
       folders: $('#opt-folders').checked,
       optional: $('#opt-optional').checked,
       overwrite,
@@ -512,6 +529,28 @@ function refreshVideosHint() {
 }
 $('#opt-videos')?.addEventListener('change', refreshVideosHint);
 refreshVideosHint();
+
+// Echo360: show the slide-track size hint and the extra-track sub-options
+// only when the parent Echo360 checkbox is on.
+function refreshCapturesHint() {
+  const hint = $('#captures-warning');
+  const extras = document.querySelectorAll('.captures-extra');
+  const compBox = $('#opt-captures-composite');
+  const audioBox = $('#opt-captures-audio');
+  const box = $('#opt-captures');
+  if (!hint || !box) return;
+  if (box.checked) {
+    hint.classList.remove('hidden');
+    extras.forEach(e => e.classList.remove('hidden'));
+  } else {
+    hint.classList.add('hidden');
+    extras.forEach(e => e.classList.add('hidden'));
+    if (compBox) compBox.checked = false;
+    if (audioBox) audioBox.checked = false;
+  }
+}
+$('#opt-captures')?.addEventListener('change', refreshCapturesHint);
+refreshCapturesHint();
 
 // Open Chrome's own download history in a new tab. Every file the extension
 // has written appears there, searchable by "Downloaded by KEATS Downloader".

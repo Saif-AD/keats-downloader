@@ -707,6 +707,57 @@ describe('cleanCourseName', () => {
   });
 });
 
+describe('Echo360 MP4 URL building', () => {
+  test('buildEcho360Url constructs the canonical CDN path', () => {
+    const url = bg.buildEcho360Url(
+      'content.echo360.org.uk',
+      '86e349d2-638d-4bf7-9b75-0b259b92e283',
+      '7c85ada6-1466-426e-b3cc-45fc331c41dd',
+      's2q1',
+    );
+    expect(url).toBe('https://content.echo360.org.uk/0000.86e349d2-638d-4bf7-9b75-0b259b92e283/7c85ada6-1466-426e-b3cc-45fc331c41dd/1/s2q1.mp4');
+  });
+
+  test('buildEcho360Url uses the requested stream variant', () => {
+    expect(bg.buildEcho360Url('host', 'INST', 'MED', 's0q1'))
+      .toContain('/s0q1.mp4');
+    expect(bg.buildEcho360Url('host', 'INST', 'MED', 's1q1'))
+      .toContain('/s1q1.mp4');
+    expect(bg.buildEcho360Url('host', 'INST', 'MED', 's2q1'))
+      .toContain('/s2q1.mp4');
+  });
+
+  test('echo360ContentHost prepends content. when needed', () => {
+    expect(bg.echo360ContentHost('echo360.org.uk')).toBe('content.echo360.org.uk');
+    expect(bg.echo360ContentHost('echo360.org')).toBe('content.echo360.org');
+    // Already prefixed — pass through
+    expect(bg.echo360ContentHost('content.echo360.org.uk')).toBe('content.echo360.org.uk');
+    expect(bg.echo360ContentHost(null)).toBeNull();
+    expect(bg.echo360ContentHost('')).toBeNull();
+  });
+
+  test('parseEcho360InstitutionId extracts institutionId from a real ECHO_JWT', () => {
+    // JWT body: { content: { institutionId: "86e349d2-638d-4bf7-9b75-0b259b92e283", userId: "..." } }
+    const payload = { iss: 'Echo360.Authn', content: { institutionId: '86e349d2-638d-4bf7-9b75-0b259b92e283', userId: 'u' } };
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const jwt = `header.${body}.signature`;
+    expect(bg.parseEcho360InstitutionId(jwt)).toBe('86e349d2-638d-4bf7-9b75-0b259b92e283');
+  });
+
+  test('parseEcho360InstitutionId returns null for malformed input', () => {
+    expect(bg.parseEcho360InstitutionId(null)).toBeNull();
+    expect(bg.parseEcho360InstitutionId('')).toBeNull();
+    expect(bg.parseEcho360InstitutionId('not-a-jwt')).toBeNull();
+    expect(bg.parseEcho360InstitutionId('a.b')).toBeNull();
+    expect(bg.parseEcho360InstitutionId('a.invalid-base64!.c')).toBeNull();
+  });
+
+  test('predictFilename returns .mp4 for echo360Mp4', () => {
+    expect(bg.predictFilename({ type: 'echo360Mp4', name: 'Lecture - 20 Jan 2026' }))
+      .toBe('Lecture - 20 Jan 2026.mp4');
+  });
+});
+
 describe('Kaltura ID extraction', () => {
   test('extracts entryId from URL-encoded iframe src (KEATS lti_launch pattern)', () => {
     const html = `<iframe id="contentframe" class="kaltura-player-iframe" src="https://keats.kcl.ac.uk/mod/kalvidres/lti_launch.php?courseid=134658&source=http%3A%2F%2Fkaltura-kaf-uri.com%2Fbrowseandembed%2Findex%2Fmedia%2Fentryid%2F1_m05ugjat%2FshowDescription%2Ffalse%2F"></iframe>`;
@@ -748,5 +799,261 @@ describe('sleep precision', () => {
     const elapsed = Date.now() - start;
     expect(elapsed).toBeGreaterThanOrEqual(90);
     expect(elapsed).toBeLessThan(200);
+  });
+});
+
+// ==================== New-files badge accuracy ====================
+
+describe('new-files matcher — fileKey uses originalHref', () => {
+  test('Kaltura history key uses originalHref so DOM kalvidres URL matches it', () => {
+    const file = {
+      sectionName: 'Week 5',
+      category: 'Lectures',
+      href: 'https://cdnapisec.kaltura.com/p/2368101/sp/236810100/playManifest/entryId/1_m05ugjat/format/download/protocol/https/flavorParamIds/0',
+      originalHref: 'https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=99999',
+    };
+    const key = bg.fileKey('Software Architecture and Design (6CCS3SAD)', file);
+    expect(key).toContain('https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=99999');
+    expect(key).not.toContain('cdnapisec.kaltura.com');
+  });
+
+  test('falls back to file.href when no originalHref present', () => {
+    const file = {
+      sectionName: 'Week 1',
+      category: 'Lectures',
+      href: 'https://keats.kcl.ac.uk/mod/resource/view.php?id=11111',
+    };
+    expect(bg.fileKey('Course', file))
+      .toBe('Course|Week 1|Lectures|https://keats.kcl.ac.uk/mod/resource/view.php?id=11111');
+  });
+});
+
+describe('normaliseHref', () => {
+  test('strips fragment but keeps query string with id', () => {
+    expect(bg.normaliseHref('https://keats.kcl.ac.uk/mod/resource/view.php?id=99#section'))
+      .toBe('https://keats.kcl.ac.uk/mod/resource/view.php?id=99');
+  });
+
+  test('strips noise param forcedownload', () => {
+    expect(bg.normaliseHref('https://keats.kcl.ac.uk/mod/resource/view.php?id=99&forcedownload=1'))
+      .toBe('https://keats.kcl.ac.uk/mod/resource/view.php?id=99');
+  });
+
+  test('strips redirect param', () => {
+    expect(bg.normaliseHref('https://keats.kcl.ac.uk/mod/resource/view.php?id=99&redirect=1'))
+      .toBe('https://keats.kcl.ac.uk/mod/resource/view.php?id=99');
+  });
+
+  test('handles empty input', () => {
+    expect(bg.normaliseHref('')).toBe('');
+    expect(bg.normaliseHref(null)).toBe('');
+  });
+
+  test('preserves query string entirely when no noise params', () => {
+    expect(bg.normaliseHref('https://x/view.php?id=1&group=2'))
+      .toBe('https://x/view.php?id=1&group=2');
+  });
+});
+
+describe('buildKnownIdentity', () => {
+  test('groups history entries by course and indexes both href and name', () => {
+    const history = {
+      'MDE|Week 1|Lectures|https://keats.kcl.ac.uk/mod/resource/view.php?id=1': {
+        name: 'Lecture 1.pdf', course: 'MDE', date: 1, path: '/x',
+      },
+      'MDE|Week 2|Lectures|https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=2': {
+        name: 'Session 2A — Intro', course: 'MDE', date: 2, path: '/x',
+      },
+      'OtherCourse|x|y|https://keats.kcl.ac.uk/mod/resource/view.php?id=99': {
+        name: 'Other.pdf', course: 'OtherCourse', date: 3, path: '/x',
+      },
+    };
+    const { knownHrefs, knownNames } = bg.buildKnownIdentity(history, 'MDE');
+    expect(knownHrefs.has('https://keats.kcl.ac.uk/mod/resource/view.php?id=1')).toBe(true);
+    expect(knownHrefs.has('https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=2')).toBe(true);
+    expect(knownHrefs.has('https://keats.kcl.ac.uk/mod/resource/view.php?id=99')).toBe(false);
+    expect(knownNames.has('lecture 1.pdf')).toBe(true);
+    expect(knownNames.has('session 2a — intro')).toBe(true);
+    expect(knownNames.has('other.pdf')).toBe(false);
+  });
+
+  test('strips fragment but keeps id query param', () => {
+    const history = {
+      'C|S|cat|https://keats.kcl.ac.uk/mod/resource/view.php?id=1#anchor': {
+        name: 'f.pdf', course: 'C', date: 1, path: '/x',
+      },
+    };
+    const { knownHrefs } = bg.buildKnownIdentity(history, 'C');
+    expect(knownHrefs.has('https://keats.kcl.ac.uk/mod/resource/view.php?id=1')).toBe(true);
+    expect(knownHrefs.has('https://keats.kcl.ac.uk/mod/resource/view.php')).toBe(false);
+  });
+
+  test('handles empty history without error', () => {
+    const { knownHrefs, knownNames } = bg.buildKnownIdentity({}, 'C');
+    expect(knownHrefs.size).toBe(0);
+    expect(knownNames.size).toBe(0);
+  });
+});
+
+describe('activityIsKnown', () => {
+  // Real-world identity sets: query string preserved (Moodle uses ?id=N as
+  // the activity identifier).
+  const knownHrefs = new Set([
+    'https://keats.kcl.ac.uk/mod/resource/view.php?id=1',
+    'https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=2',
+  ]);
+  const knownNames = new Set(['session 2a — intro', 'lecture recording — 20 jan 2026']);
+
+  test('matches by exact href (with query string)', () => {
+    const a = { type: 'resource', name: 'Some Random Title', href: 'https://keats.kcl.ac.uk/mod/resource/view.php?id=1' };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(true);
+  });
+
+  test('matches by name even when href is different (Kaltura case)', () => {
+    const a = {
+      type: 'kaltura',
+      name: 'Session 2A — Intro',
+      // Page DOM has the kalvidres URL, history (pre-fix) might have CDN URL
+      href: 'https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=999',
+    };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(true);
+  });
+
+  test('matches Echo360 by stable lecture name', () => {
+    const a = {
+      type: 'lti',
+      name: 'Lecture Recording — 20 Jan 2026',
+      href: 'https://keats.kcl.ac.uk/mod/lti/view.php?id=42',
+    };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(true);
+  });
+
+  test('returns false when neither href nor name is in history', () => {
+    const a = { type: 'resource', name: 'New Lecture Slides', href: 'https://keats.kcl.ac.uk/mod/resource/view.php?id=99' };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(false);
+  });
+
+  test('different ?id values are treated as different activities', () => {
+    // This is the regression we're guarding: stripping ? would have made
+    // every Moodle resource collapse into the same href.
+    const a = { type: 'resource', name: 'Different File', href: 'https://keats.kcl.ac.uk/mod/resource/view.php?id=42' };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(false);
+  });
+
+  test('matches name case-insensitively with whitespace normalisation', () => {
+    const a = { type: 'kaltura', name: '  SESSION 2A  —  Intro  ', href: 'https://x?id=999' };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(true);
+  });
+
+  test('strips fragment and noise params from activity href before comparison', () => {
+    const a = {
+      type: 'resource',
+      name: 'unrelated',
+      href: 'https://keats.kcl.ac.uk/mod/resource/view.php?id=1&forcedownload=1#section',
+    };
+    expect(bg.activityIsKnown(a, knownHrefs, knownNames)).toBe(true);
+  });
+
+  test('end-to-end: a Kaltura download history entry matches the same lecture on the next page visit', () => {
+    // Simulate a real history entry created after Kaltura was downloaded:
+    // fileKey uses originalHref (the kalvidres view URL) thanks to the v1.5.x
+    // fix, and entry.name is the lecture title.
+    const history = {
+      'MDE|Week 5|Lectures|https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=99': {
+        name: 'Session 2A — Intro', course: 'MDE', date: 1, path: '/x',
+      },
+    };
+    const ident = bg.buildKnownIdentity(history, 'MDE');
+    // Activity scraped from the live DOM (title + kalvidres URL with query).
+    const livePageActivity = {
+      type: 'kaltura',
+      name: 'Session 2A — Intro',
+      href: 'https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=99',
+    };
+    expect(bg.activityIsKnown(livePageActivity, ident.knownHrefs, ident.knownNames)).toBe(true);
+  });
+
+  test('end-to-end: a brand new lecture uploaded next week is NOT marked known', () => {
+    const history = {
+      'MDE|Week 5|Lectures|https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=99': {
+        name: 'Session 2A — Intro', course: 'MDE', date: 1, path: '/x',
+      },
+    };
+    const ident = bg.buildKnownIdentity(history, 'MDE');
+    const newLecture = {
+      type: 'kaltura',
+      name: 'Session 3A — Architectural Patterns',
+      href: 'https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=100',
+    };
+    expect(bg.activityIsKnown(newLecture, ident.knownHrefs, ident.knownNames)).toBe(false);
+  });
+
+  test('end-to-end: pre-fix Kaltura history (with playManifest URL) still matches via name fallback', () => {
+    // Older history entries created before the originalHref fix have the CDN
+    // URL as the key. The DOM only ever has the kalvidres URL. They never
+    // match by href, so the name fallback is the only thing that catches
+    // them. This protects users upgrading from v1.4.x.
+    const history = {
+      'MDE|Week 5|Lectures|https://cdnsec.kaf.kaltura.com/p/2368101/sp/.../format/url/...': {
+        name: 'Session 2A — Intro', course: 'MDE', date: 1, path: '/x',
+      },
+    };
+    const ident = bg.buildKnownIdentity(history, 'MDE');
+    const livePageActivity = {
+      type: 'kaltura',
+      name: 'Session 2A — Intro',
+      href: 'https://keats.kcl.ac.uk/mod/kalvidres/view.php?id=99',
+    };
+    expect(bg.activityIsKnown(livePageActivity, ident.knownHrefs, ident.knownNames)).toBe(true);
+  });
+});
+
+describe('scrapeFileHrefsLightweight is exported and callable', () => {
+  test('function exists', () => {
+    expect(typeof bg.scrapeFileHrefsLightweight).toBe('function');
+  });
+
+  test('function exists for fetchSectionActivitiesInPage', () => {
+    expect(typeof bg.fetchSectionActivitiesInPage).toBe('function');
+  });
+});
+
+describe('course completion tracking', () => {
+  beforeEach(async () => {
+    await chrome.storage.local.set({ courseCompletions: {} });
+  });
+
+  test('markCourseCompleted writes a timestamped entry', async () => {
+    await bg.markCourseCompleted('Software Architecture and Design (6CCS3SAD)', 84);
+    const completions = await bg.getCourseCompletions();
+    expect(completions['Software Architecture and Design (6CCS3SAD)']).toBeDefined();
+    expect(completions['Software Architecture and Design (6CCS3SAD)'].fileCount).toBe(84);
+    expect(typeof completions['Software Architecture and Design (6CCS3SAD)'].completedAt).toBe('number');
+  });
+
+  test('markCourseCompleted is a no-op for empty courseName', async () => {
+    await chrome.storage.local.set({ courseCompletions: {} });
+    await bg.markCourseCompleted('', 5);
+    await bg.markCourseCompleted(null, 5);
+    const completions = await bg.getCourseCompletions();
+    expect(Object.keys(completions).length).toBe(0);
+  });
+
+  test('multiple courses tracked independently', async () => {
+    await bg.markCourseCompleted('Course A', 30);
+    await bg.markCourseCompleted('Course B', 50);
+    const completions = await bg.getCourseCompletions();
+    expect(completions['Course A'].fileCount).toBe(30);
+    expect(completions['Course B'].fileCount).toBe(50);
+  });
+
+  test('re-marking a course updates the timestamp and count', async () => {
+    await bg.markCourseCompleted('Course A', 30);
+    const first = (await bg.getCourseCompletions())['Course A'].completedAt;
+    await new Promise((r) => setTimeout(r, 5));
+    await bg.markCourseCompleted('Course A', 35);
+    const second = (await bg.getCourseCompletions())['Course A'];
+    expect(second.fileCount).toBe(35);
+    expect(second.completedAt).toBeGreaterThanOrEqual(first);
   });
 });
